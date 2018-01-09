@@ -1,3 +1,1046 @@
+/**
+ * Copyright 2015 Google Inc. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+/* eslint-env browser */
+
+if ('serviceWorker' in navigator) {
+	// Delay registration until after the page has loaded, to ensure that our
+	// precaching requests don't degrade the first visit experience.
+	// See https://developers.google.com/web/fundamentals/instant-and-offline/service-worker/registration
+	window.addEventListener('load', function() {
+		// Your service-worker.js *must* be located at the top-level directory relative to your site.
+		// It won't be able to control pages unless it's located at the same level or higher than them.
+		// *Don't* register service worker file in, e.g., a scripts/ sub-directory!
+		// See https://github.com/slightlyoff/ServiceWorker/issues/468
+		navigator.serviceWorker
+			.register('service-worker.js')
+			.then(function(reg) {
+				// updatefound is fired if service-worker.js changes.
+				reg.onupdatefound = function() {
+					// The updatefound event implies that reg.installing is set; see
+					// https://w3c.github.io/ServiceWorker/#service-worker-registration-updatefound-event
+					var installingWorker = reg.installing;
+
+					installingWorker.onstatechange = function() {
+						switch (installingWorker.state) {
+							case 'installed':
+								if (navigator.serviceWorker.controller) {
+									// At this point, the old content will have been purged and the fresh content will
+									// have been added to the cache.
+									// It's the perfect time to display a "New content is available; please refresh."
+									// message in the page's interface.
+									console.log('New or updated content is available.');
+								} else {
+									// At this point, everything has been precached.
+									// It's the perfect time to display a "Content is cached for offline use." message.
+									console.log('Content is now available offline!');
+								}
+								break;
+
+							case 'redundant':
+								console.error(
+									'The installing service worker became redundant.'
+								);
+								break;
+						}
+					};
+				};
+			})
+			.catch(function(e) {
+				console.error('Error during service worker registration:', e);
+			});
+	});
+}
+
+(function() {
+	window.DEBUG = document.cookie.indexOf('wmdebug') > -1;
+
+	window.$ = document.querySelector.bind(document);
+	window.$all = selector => [...document.querySelectorAll(selector)];
+	var alphaNum =
+		'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+
+	/**
+	 * The following 2 functions are supposed to find the next/previous sibling until the
+	 * passed `selector` is matched. But for now it actually finds the next/previous
+	 * element of `this` element in the list of `selector` matched element inside `this`'s
+	 * parent.
+	 * @param  Selector that should match for next siblings
+	 * @return element Next element that mathes `selector`
+	 */
+	Node.prototype.nextUntil = function(selector) {
+		const siblings = [...this.parentNode.querySelectorAll(selector)];
+		const index = siblings.indexOf(this);
+		return siblings[index + 1];
+	};
+
+	/*
+	 * @param  Selector that should match for next siblings
+	 * @return element Next element that mathes `selector`
+	 */
+	Node.prototype.previousUntil = function(selector) {
+		const siblings = [...this.parentNode.querySelectorAll(selector)];
+		const index = siblings.indexOf(this);
+		return siblings[index - 1];
+	};
+
+	// https://github.com/substack/semver-compare/blob/master/index.js
+	function semverCompare(a, b) {
+		var pa = a.split('.');
+		var pb = b.split('.');
+		for (var i = 0; i < 3; i++) {
+			var na = Number(pa[i]);
+			var nb = Number(pb[i]);
+			if (na > nb) {
+				return 1;
+			}
+			if (nb > na) {
+				return -1;
+			}
+			if (!isNaN(na) && isNaN(nb)) {
+				return 1;
+			}
+			if (isNaN(na) && !isNaN(nb)) {
+				return -1;
+			}
+		}
+		return 0;
+	}
+
+	function generateRandomId(len) {
+		var length = len || 10;
+		var id = '';
+		for (var i = length; i--; ) {
+			id += alphaNum[~~(Math.random() * alphaNum.length)];
+		}
+		return id;
+	}
+
+	function onButtonClick(btn, listener) {
+		btn.addEventListener('click', function buttonClickListener(e) {
+			listener(e);
+			return false;
+		});
+	}
+
+	function log() {
+		if (window.DEBUG) {
+			console.log(...arguments);
+		}
+	}
+
+	/**
+	 * Adds timed limit on the loops found in the passed code.
+	 * Contributed by Ariya Hidayat!
+	 * @param code {string}	Code to be protected from infinite loops.
+	 */
+	function addInfiniteLoopProtection(code) {
+		var loopId = 1;
+		var patches = [];
+		var varPrefix = '_wmloopvar';
+		var varStr = 'var %d = Date.now();\n';
+		var checkStr =
+			'\nif (Date.now() - %d > 1000) { window.top.previewException(new Error("Infinite loop")); break;}\n';
+
+		esprima.parse(code, { tolerant: true, range: true, jsx: true }, function(
+			node
+		) {
+			switch (node.type) {
+				case 'DoWhileStatement':
+				case 'ForStatement':
+				case 'ForInStatement':
+				case 'ForOfStatement':
+				case 'WhileStatement':
+					var start = 1 + node.body.range[0];
+					var end = node.body.range[1];
+					var prolog = checkStr.replace('%d', varPrefix + loopId);
+					var epilog = '';
+
+					if (node.body.type !== 'BlockStatement') {
+						// `while(1) doThat()` becomes `while(1) {doThat()}`
+						prolog = '{' + prolog;
+						epilog = '}';
+						--start;
+					}
+
+					patches.push({ pos: start, str: prolog });
+					patches.push({ pos: end, str: epilog });
+					patches.push({
+						pos: node.range[0],
+						str: varStr.replace('%d', varPrefix + loopId)
+					});
+					++loopId;
+					break;
+
+				default:
+					break;
+			}
+		});
+
+		/* eslint-disable no-param-reassign */
+		patches
+			.sort(function(a, b) {
+				return b.pos - a.pos;
+			})
+			.forEach(function(patch) {
+				code = code.slice(0, patch.pos) + patch.str + code.slice(patch.pos);
+			});
+
+		/* eslint-disable no-param-reassign */
+		return code;
+	}
+
+	function getHumanDate(timestamp) {
+		var d = new Date(timestamp);
+		var retVal =
+			d.getDate() +
+			' ' +
+			[
+				'January',
+				'February',
+				'March',
+				'April',
+				'May',
+				'June',
+				'July',
+				'August',
+				'September',
+				'October',
+				'November',
+				'December'
+			][d.getMonth()] +
+			' ' +
+			d.getFullYear();
+		return retVal;
+	}
+
+	// create a one-time event
+	function once(node, type, callback) {
+		// create event
+		node.addEventListener(type, function(e) {
+			// remove event
+			e.target.removeEventListener(type, arguments.callee);
+			// call handler
+			return callback(e);
+		});
+	}
+
+	window.utils = {
+		semverCompare: semverCompare,
+		generateRandomId: generateRandomId,
+		onButtonClick: onButtonClick,
+		addInfiniteLoopProtection: addInfiniteLoopProtection,
+		getHumanDate: getHumanDate,
+		log: log,
+		once: once
+	};
+
+	window.chrome = window.chrome || {};
+	window.chrome.i18n = { getMessage: () => {} };
+
+	window.IS_EXTENSION = !!window.chrome.extension;
+})();
+
+(() => {
+	const FAUX_DELAY = 1;
+
+	var db;
+	var dbPromise;
+
+	var local = {
+		get: (obj, cb) => {
+			const retVal = {};
+			if (typeof obj === 'string') {
+				retVal[obj] = JSON.parse(window.localStorage.getItem(obj));
+				setTimeout(() => cb(retVal), FAUX_DELAY);
+			} else {
+				Object.keys(obj).forEach(key => {
+					const val = window.localStorage.getItem(key);
+					retVal[key] =
+						val === undefined || val === null ? obj[key] : JSON.parse(val);
+				});
+				setTimeout(() => cb(retVal), FAUX_DELAY);
+			}
+		},
+		set: (obj, cb) => {
+			Object.keys(obj).forEach(key => {
+				window.localStorage.setItem(key, JSON.stringify(obj[key]));
+			});
+			/* eslint-disable consistent-return */
+			setTimeout(() => {
+				if (cb) {
+					return cb();
+				}
+			}, FAUX_DELAY);
+			/* eslint-enable consistent-return */
+		}
+	};
+	const dbLocalAlias = chrome && chrome.storage ? chrome.storage.local : local;
+	const dbSyncAlias = chrome && chrome.storage ? chrome.storage.sync : local;
+
+	async function getDb() {
+		if (dbPromise) {
+			return dbPromise;
+		}
+		utils.log('Initializing firestore');
+		dbPromise = new Promise((resolve, reject) => {
+			if (db) {
+				return resolve(db);
+			}
+			return firebase
+				.firestore()
+				.enablePersistence()
+				.then(function() {
+					// Initialize Cloud Firestore through firebase
+					db = firebase.firestore();
+					utils.log('firebase db ready', db);
+					resolve(db);
+				})
+				.catch(function(err) {
+					reject(err.code);
+					if (err.code === 'failed-precondition') {
+						// Multiple tabs open, persistence can only be enabled
+						// in one tab at a a time.
+						// ...
+					} else if (err.code === 'unimplemented') {
+						// The current browser does not support all of the
+						// features required to enable persistence
+						// ...
+					}
+				});
+		});
+		return dbPromise;
+	}
+
+	async function getUserLastSeenVersion() {
+		const d = deferred();
+		// Will be chrome.storage.sync in extension environment,
+		// otherwise will fallback to localstorage
+		dbSyncAlias.get(
+			{
+				lastSeenVersion: ''
+			},
+			result => {
+				d.resolve(result.lastSeenVersion);
+			}
+		);
+		return d.promise;
+		// Might consider getting actual value from remote db.
+		// Not critical right now.
+	}
+
+	async function setUserLastSeenVersion(version) {
+		if (window.IS_EXTENSION) {
+			chrome.storage.sync.set(
+				{
+					lastSeenVersion: version
+				},
+				function() {}
+			);
+			return;
+		}
+		// Settings the lastSeenVersion in localStorage also because next time we need
+		// to fetch it irrespective of the user being logged in or out
+		local.set({ lastSeenVersion: version });
+		if (window.user) {
+			const remoteDb = await getDb();
+			remoteDb
+				.doc(`users/${window.user.uid}`)
+				.update({ lastSeenVersion: version });
+		}
+	}
+
+	async function getUser(userId) {
+		const remoteDb = await getDb();
+		return remoteDb.doc(`users/${userId}`).get().then(doc => {
+			if (!doc.exists)
+				return remoteDb.doc(`users/${userId}`).set({}, { merge: true });
+			const user = doc.data();
+			Object.assign(window.user, user);
+			return user;
+		});
+	}
+
+	function getSettings(defaultSettings) {
+		const d = deferred();
+		// Will be chrome.storage.sync in extension environment,
+		// otherwise will fallback to localstorage
+		dbSyncAlias.get(defaultSettings, result => {
+			d.resolve(result);
+		});
+		return d.promise;
+	}
+
+	window.db = {
+		getDb,
+		getUser,
+		getUserLastSeenVersion,
+		setUserLastSeenVersion,
+		getSettings,
+		local: dbLocalAlias,
+		sync: dbSyncAlias
+	};
+})();
+
+window.logout = function logout() {
+	firebase.auth().signOut();
+};
+function login(providerName) {
+	var provider;
+	if (providerName === 'fb') {
+		provider = new firebase.auth.FacebookAuthProvider();
+	} else if (providerName === 'twitter') {
+		provider = new firebase.auth.TwitterAuthProvider();
+	} else if (providerName === 'google') {
+		provider = new firebase.auth.GoogleAuthProvider();
+		provider.addScope('https://www.googleapis.com/auth/userinfo.profile');
+	} else {
+		provider = new firebase.auth.GithubAuthProvider();
+	}
+
+	return firebase
+		.auth()
+		.signInWithPopup(provider)
+		.then(function(result) {
+			return;
+			// Save this user in the store
+			firebase
+				.database()
+				.ref('users/' + result.user.uid)
+				.update({
+					displayName: result.user.displayName,
+					email: result.user.email,
+					photoURL: result.user.providerData[0].photoURL,
+					signedUpOn: Date.now()
+				})
+				.then(function() {
+					// Port items in localstorage to user account
+					if (window.localStorage.prototyp) {
+						var items = JSON.parse(window.localStorage.prototyp);
+						var newItemKey;
+						items.forEach(function(localItem) {
+							itemService.fetchItem(localItem.id).then(function(item) {
+								newItemKey = firebase.database().ref('pens').push().key;
+								item.createdBy = result.user.uid;
+								delete item.uid;
+								firebase.database().ref('pens/' + newItemKey).set(item);
+								firebase
+									.database()
+									.ref('users/' + result.user.uid)
+									.child('items')
+									.child(newItemKey)
+									.set(true);
+							});
+						});
+						delete localStorage.prototyp;
+					}
+				});
+		})
+		.catch(function(error) {
+			// Handle Errors here.
+			var errorCode = error.code;
+			var errorMessage = error.message;
+			// The email of the user's account used.
+			var email = error.email;
+			// The firebase.auth.AuthCredential type that was used.
+			var credential = error.credential;
+			utils.log(error);
+		});
+}
+window.login = login;
+
+/* global ga */
+// eslint-disable-next-line max-params
+window.trackEvent = function(category, action, label, value) {
+	if (window.DEBUG) {
+		utils.log('trackevent', category, action, label, value);
+		return;
+	}
+	if (window.ga) {
+		ga('send', 'event', category, action, label, value);
+	}
+};
+
+// if online, load after sometime
+if (navigator.onLine && !window.DEBUG) {
+	/* eslint-disable */
+
+	// prettier-ignore
+	setTimeout(function() {
+		(function(i,s,o,g,r,a,m){
+			i['GoogleAnalyticsObject']=r;
+			i[r]=i[r]||function(){
+		(i[r].q=i[r].q||[]).push(arguments)},i[r].l=1*new Date();a=s.createElement(o),
+		m=s.getElementsByTagName(o)[0];a.async=1;a.src=g;m.parentNode.insertBefore(a,m)
+		})(window,document,'script','https://www.google-analytics.com/analytics.js','ga');
+
+		ga('create', 'UA-87786708-1', {'cookieDomain': 'none'});
+		// required for chrome extension protocol
+		ga('set', 'checkProtocolTask', function(){ /* nothing */ });
+		ga('send', 'pageview');
+	}, 100);
+
+	/* eslint-enable */
+}
+
+(function() {
+	window.deferred = function() {
+		var d = {};
+		var promise = new Promise(function(resolve, reject) {
+			d.resolve = resolve;
+			d.reject = reject;
+		});
+
+		// Add the native promise as a key on deferred object.
+		d.promise = promise;
+		// Also move all props/methods of native promise on the deferred obj.
+		return Object.assign(d, promise);
+	};
+})();
+
+(function(w) {
+	window.loadJS = function(src) {
+		var d = deferred();
+		var ref = w.document.getElementsByTagName('script')[0];
+		var script = w.document.createElement('script');
+		script.src = src;
+		script.async = true;
+		ref.parentNode.insertBefore(script, ref);
+		script.onload = function() {
+			d.resolve();
+		};
+		return d.promise;
+	};
+})(window);
+
+(function() {
+	const noticationContainerEL = $('#js-alerts-container');
+	var hideTimeout;
+
+	function addNotification(msg) {
+		// var n = document.createElement('div');
+		// div.textContent = msg;
+		// noticationContainerEL.appendChild(n);
+		noticationContainerEL.textContent = msg;
+		noticationContainerEL.classList.add('is-active');
+
+		clearTimeout(hideTimeout);
+		hideTimeout = setTimeout(function() {
+			noticationContainerEL.classList.remove('is-active');
+		}, 2000);
+	}
+
+	window.alertsService = {
+		add: addNotification
+	};
+})();
+
+window.jsLibs = [
+	{
+		url: 'https://code.jquery.com/jquery-3.2.1.min.js',
+		label: 'jQuery',
+		type: 'js'
+	},
+	{
+		url: 'https://maxcdn.bootstrapcdn.com/bootstrap/3.3.7/js/bootstrap.min.js',
+		label: 'Bootstrap 3',
+		type: 'js'
+	},
+	{
+		url:
+			'https://maxcdn.bootstrapcdn.com/bootstrap/4.0.0-beta.2/js/bootstrap.min.js',
+		label: 'Bootstrap 4β',
+		type: 'js'
+	},
+	{
+		url:
+			'https://cdnjs.cloudflare.com/ajax/libs/foundation/6.4.3/js/foundation.min.js',
+		label: 'Foundation',
+		type: 'js'
+	},
+	{
+		url: 'https://semantic-ui.com/dist/semantic.min.js',
+		label: 'Semantic UI',
+		type: 'js'
+	},
+	{
+		url: 'https://ajax.googleapis.com/ajax/libs/angularjs/1.6.4/angular.min.js',
+		label: 'Angular',
+		type: 'js'
+	},
+	{
+		url:
+			'https://cdnjs.cloudflare.com/ajax/libs/react/16.2.0/cjs/react.production.min.js',
+		label: 'React',
+		type: 'js'
+	},
+	{
+		url: 'https://cdnjs.cloudflare.com/ajax/libs/react/15.6.1/react-dom.min.js',
+		label: 'React DOM',
+		type: 'js'
+	},
+	{
+		url: 'https://unpkg.com/vue@2.5.0/dist/vue.min.js',
+		label: 'Vue.js',
+		type: 'js'
+	},
+	{
+		url: 'https://cdnjs.cloudflare.com/ajax/libs/three.js/85/three.min.js',
+		label: 'Three.js',
+		type: 'js'
+	},
+	{
+		url: 'https://cdnjs.cloudflare.com/ajax/libs/d3/4.10.2/d3.min.js',
+		label: 'D3',
+		type: 'js'
+	},
+	{
+		url:
+			'https://cdnjs.cloudflare.com/ajax/libs/underscore.js/1.8.3/underscore-min.js',
+		label: 'Underscore',
+		type: 'js'
+	},
+	{
+		url: 'https://cdnjs.cloudflare.com/ajax/libs/gsap/1.20.3/TweenMax.min.js',
+		label: 'Greensock TweenMax',
+		type: 'js'
+	},
+	{
+		url: 'https://cdnjs.cloudflare.com/ajax/libs/uikit/2.27.4/js/uikit.min.js',
+		label: 'UIkit 2',
+		type: 'js'
+	},
+	{
+		url:
+			'https://cdnjs.cloudflare.com/ajax/libs/uikit/3.0.0-beta.31/js/uikit.min.js',
+		label: 'UIkit 3',
+		type: 'js'
+	}
+];
+window.cssLibs = [
+	{
+		url:
+			'https://maxcdn.bootstrapcdn.com/bootstrap/3.3.7/css/bootstrap.min.css',
+		label: 'Bootstrap 3',
+		type: 'css'
+	},
+	{
+		url:
+			'https://maxcdn.bootstrapcdn.com/bootstrap/4.0.0-beta.2/css/bootstrap.min.css',
+		label: 'Bootstrap 4β',
+		type: 'css'
+	},
+	{
+		url:
+			'https://cdnjs.cloudflare.com/ajax/libs/foundation/6.4.3/css/foundation.min.css',
+		label: 'Foundation',
+		type: 'css'
+	},
+	{
+		url: 'https://semantic-ui.com/dist/semantic.min.css',
+		label: 'Semantic UI',
+		type: 'css'
+	},
+	{
+		url: 'https://cdnjs.cloudflare.com/ajax/libs/bulma/0.6.0/css/bulma.min.css',
+		label: 'Bulma',
+		type: 'css'
+	},
+
+	{
+		url: 'https://cdnjs.cloudflare.com/ajax/libs/hint.css/2.5.0/hint.min.css',
+		label: 'Hint.css',
+		type: 'css'
+	},
+	{
+		url:
+			'https://cdnjs.cloudflare.com/ajax/libs/uikit/2.27.4/css/uikit.min.css',
+		label: 'UIkit 2',
+		type: 'css'
+	},
+	{
+		url:
+			'https://cdnjs.cloudflare.com/ajax/libs/uikit/3.0.0-beta.31/css/uikit.min.css',
+		label: 'UIkit 3',
+		type: 'css'
+	},
+	{
+		url:
+			'https://cdnjs.cloudflare.com/ajax/libs/animate.css/3.5.2/animate.min.css',
+		label: 'Animate.css',
+		type: 'css'
+	},
+	{
+		url:
+			'https://maxcdn.bootstrapcdn.com/font-awesome/4.7.0/css/font-awesome.min.css',
+		label: 'FontAwesome',
+		type: 'css'
+	}
+];
+
+// textarea-autocomplete.js
+(function() {
+	class TextareaAutoComplete {
+		constructor(textarea, options) {
+			this.t = textarea;
+			this.filter = options.filter;
+			this.selectedCallback = options.selectedCallback;
+			var wrap = document.createElement('div');
+			wrap.classList.add('btn-group');
+			textarea.parentElement.insertBefore(wrap, textarea);
+			wrap.insertBefore(textarea, null);
+			this.list = document.createElement('ul');
+			this.list.classList.add('dropdown__menu');
+			this.list.classList.add('autocomplete-dropdown');
+			wrap.insertBefore(this.list, null);
+
+			this.loader = document.createElement('div');
+			this.loader.classList.add('loader');
+			this.loader.classList.add('autocomplete__loader');
+			this.loader.style.display = 'none';
+			wrap.insertBefore(this.loader, null);
+
+			// after list is insrted into the DOM, we put it in the body
+			// fixed at same position
+			setTimeout(() => {
+				requestIdleCallback(() => {
+					document.body.appendChild(this.list);
+					this.list.style.position = 'fixed';
+				});
+			}, 100);
+
+			this.t.addEventListener('input', e => this.onInput(e));
+			this.t.addEventListener('keydown', e => this.onKeyDown(e));
+			this.t.addEventListener('blur', e => this.closeSuggestions(e));
+			this.list.addEventListener('mousedown', e => this.onListMouseDown(e));
+		}
+
+		get currentLineNumber() {
+			return this.t.value.substr(0, this.t.selectionStart).split('\n').length;
+		}
+		get currentLine() {
+			var line = this.currentLineNumber;
+			return this.t.value.split('\n')[line - 1];
+		}
+		closeSuggestions() {
+			this.list.classList.remove('is-open');
+			this.isShowingSuggestions = false;
+		}
+		getList(input) {
+			var url = 'https://api.cdnjs.com/libraries?search=';
+			return fetch(url + input).then(response => {
+				return response.json().then(json => json.results);
+			});
+		}
+		replaceCurrentLine(val) {
+			var lines = this.t.value.split('\n');
+			lines.splice(this.currentLineNumber - 1, 1, val);
+			this.t.value = lines.join('\n');
+		}
+		onInput() {
+			var currentLine = this.currentLine;
+			if (currentLine) {
+				if (
+					currentLine.indexOf('/') !== -1 ||
+					currentLine.match(/https*:\/\//)
+				) {
+					return;
+				}
+				clearTimeout(this.timeout);
+				this.timeout = setTimeout(() => {
+					this.loader.style.display = 'block';
+					this.getList(currentLine).then(arr => {
+						this.loader.style.display = 'none';
+						if (!arr.length) {
+							this.closeSuggestions();
+							return;
+						}
+						this.list.innerHTML = '';
+						if (this.filter) {
+							/* eslint-disable no-param-reassign */
+							arr = arr.filter(this.filter);
+						}
+						for (var i = 0; i < Math.min(arr.length, 10); i++) {
+							this.list.innerHTML += `<li data-url="${arr[i].latest}"><a>${arr[
+								i
+							].name}</a></li>`;
+						}
+						this.isShowingSuggestions = true;
+						if (!this.textareaBounds) {
+							this.textareaBounds = this.t.getBoundingClientRect();
+							this.list.style.top = this.textareaBounds.bottom + 'px';
+							this.list.style.left = this.textareaBounds.left + 'px';
+							this.list.style.width = this.textareaBounds.width + 'px';
+						}
+						this.list.classList.add('is-open');
+					});
+				}, 500);
+			}
+		}
+		onKeyDown(event) {
+			var selectedItemElement;
+			if (!this.isShowingSuggestions) {
+				return;
+			}
+
+			if (event.keyCode === 27) {
+				this.closeSuggestions();
+				event.stopPropagation();
+			}
+			if (event.keyCode === 40 && this.isShowingSuggestions) {
+				selectedItemElement = this.list.querySelector('.selected');
+				if (selectedItemElement) {
+					selectedItemElement.classList.remove('selected');
+					selectedItemElement.nextElementSibling.classList.add('selected');
+				} else {
+					this.list.querySelector('li:first-child').classList.add('selected');
+				}
+				this.list.querySelector('.selected').scrollIntoView(false);
+				event.preventDefault();
+			} else if (event.keyCode === 38 && this.isShowingSuggestions) {
+				selectedItemElement = this.list.querySelector('.selected');
+				if (selectedItemElement) {
+					selectedItemElement.classList.remove('selected');
+					selectedItemElement.previousElementSibling.classList.add('selected');
+				} else {
+					this.list.querySelector('li:first-child').classList.add('selected');
+				}
+				this.list.querySelector('.selected').scrollIntoView(false);
+				event.preventDefault();
+			} else if (event.keyCode === 13 && this.isShowingSuggestions) {
+				selectedItemElement = this.list.querySelector('.selected');
+				this.selectSuggestion(selectedItemElement.dataset.url);
+				this.closeSuggestions();
+			}
+		}
+		onListMouseDown(event) {
+			var target = event.target;
+			if (target.parentElement.dataset.url) {
+				this.selectSuggestion(target.parentElement.dataset.url);
+			}
+		}
+
+		selectSuggestion(value) {
+			if (this.selectedCallback) {
+				this.selectedCallback.call(null, value);
+			} else {
+				this.replaceCurrentLine(value);
+			}
+			this.closeSuggestions();
+		}
+	}
+
+	window.TextareaAutoComplete = TextareaAutoComplete;
+})();
+
+(() => {
+	window.itemService = {
+		async getItem(id) {
+			var remoteDb = await window.db.getDb();
+			return remoteDb.doc(`items/${id}`).get().then(doc => {
+				return doc.data();
+			});
+		},
+		async getUserItemIds() {
+			if (window.user) {
+				return new Promise(resolve => {
+					resolve(window.user.items || {});
+				});
+			}
+			var remoteDb = await window.db.getDb();
+			return remoteDb.doc(`users/${window.user.uid}`).get().then(doc => {
+				if (!doc.exists) {
+					return {};
+				}
+				return doc.data().items;
+			});
+		},
+
+		async getAllItems() {
+			var d = deferred();
+			let itemIds = await this.getUserItemIds();
+			itemIds = Object.getOwnPropertyNames(itemIds || {});
+			utils.log('itemids', itemIds);
+
+			if (!itemIds.length) {
+				d.resolve([]);
+			}
+
+			const items = [];
+			for (let i = 0; i < itemIds.length; i++) {
+				const id = itemIds[i];
+				utils.log('Starting to fetch item ', id);
+				this.getItem(id).then(item => {
+					items.push(item);
+					// Check if we have all items now.
+					if (itemIds.length === items.length) {
+						d.resolve(items);
+					}
+				});
+			}
+			return d.promise;
+		},
+
+		async setUser() {
+			const remoteDb = await window.db.getDb();
+			return remoteDb.doc(`users/${window.user.uid}`).set({
+				items: {}
+			});
+		},
+
+		async setItem(id, item) {
+			if (!window.user) {
+				return new Promise(resolve => resolve());
+			}
+			var remoteDb = await window.db.getDb();
+			utils.log(`Starting to save item ${id}`);
+			item.createdBy = window.user.uid;
+			return remoteDb
+				.collection('items')
+				.doc(id)
+				.set(item, {
+					merge: true
+				})
+				.then(arg => {
+					utils.log('Document written', arg);
+				})
+				.catch(error => utils.log(error));
+		},
+
+		/**
+		 * Saves the passed items in the database.
+		 * @param {Array} items to be saved in DB
+		 */
+		saveItems(items) {
+			var d = deferred();
+			if (window.IS_EXTENSION) {
+				// save new items
+				window.db.local.set(items, d.resolve);
+				// Push in new item IDs
+				window.db.local.get(
+					{
+						items: {}
+					},
+					function(result) {
+						/* eslint-disable guard-for-in */
+						for (var id in items) {
+							result.items[id] = true;
+						}
+						window.db.local.set({
+							items: result.items
+						});
+						/* eslint-enable guard-for-in */
+					}
+				);
+			} else {
+				window.db.getDb().then(remoteDb => {
+					const batch = remoteDb.batch();
+					/* eslint-disable guard-for-in */
+					for (var id in items) {
+						items[id].createdBy = window.user.uid;
+						batch.set(remoteDb.doc(`items/${id}`), items[id]);
+						batch.update(remoteDb.doc(`users/${window.user.uid}`), {
+							[`items.${id}`]: true
+						});
+						// Set these items on out cached user object too
+						window.user.items[id] = true;
+					}
+					batch.commit().then(d.resolve);
+					/* eslint-enable guard-for-in */
+				});
+			}
+			return d.promise;
+		},
+
+		async removeItem(id) {
+			if (window.IS_EXTENSION) {
+				var d = deferred();
+				db.local.remove(id, d.resolve);
+				return d.promise;
+			}
+			const remoteDb = await window.db.getDb();
+			utils.log(`Starting to save item ${id}`);
+			return remoteDb
+				.collection('items')
+				.doc(id)
+				.delete()
+				.then(arg => {
+					utils.log('Document removed', arg);
+				})
+				.catch(error => utils.log(error));
+		},
+
+		async setItemForUser(itemId) {
+			if (window.IS_EXTENSION || !window.user) {
+				return window.db.local.get(
+					{
+						items: {}
+					},
+					function(result) {
+						result.items[itemId] = true;
+						window.db.local.set({
+							items: result.items
+						});
+					}
+				);
+			}
+			const remoteDb = await window.db.getDb();
+			return remoteDb
+				.collection('users')
+				.doc(window.user.uid)
+				.update({
+					[`items.${itemId}`]: true
+				})
+				.then(arg => {
+					utils.log(`Item ${itemId} set for user`, arg);
+					window.user.items = window.user.items || {};
+					window.user.items[itemId] = true;
+				})
+				.catch(error => utils.log(error));
+		},
+
+		async unsetItemForUser(itemId) {
+			if (window.IS_EXTENSION) {
+				return window.db.local.get(
+					{
+						items: {}
+					},
+					function(result) {
+						delete result.items[itemId];
+						db.local.set({
+							items: result.items
+						});
+					}
+				);
+			}
+			const remoteDb = await window.db.getDb();
+			return remoteDb
+				.collection('users')
+				.doc(window.user.uid)
+				.update({
+					[`items.${itemId}`]: firebase.firestore.FieldValue.delete()
+				})
+				.then(arg => {
+					utils.log(`Item ${itemId} unset for user`, arg);
+				})
+				.catch(error => utils.log(error));
+		}
+	};
+})();
+
 /* global trackEvent */
 /* global layoutBtn1, layoutBtn2, layoutBtn3, helpModal, notificationsModal, addLibraryModal,
 onboardModal, layoutBtn1, layoutBtn2, layoutBtn3, layoutBtn4, onboardModal, onboardModal,
@@ -2522,3 +3565,34 @@ loginModal
 
 	init();
 })(window.alertsService, window.itemService);
+
+// Dropdown.js
+
+(function($all) {
+	var openDropdown;
+
+	// Closes all dropdowns except the passed one.
+	function closeOpenDropdown(except) {
+		if (openDropdown && (!except || except !== openDropdown)) {
+			openDropdown.classList.remove('open');
+			openDropdown = null;
+		}
+	}
+	function init() {
+		var dropdowns = $all('[dropdown]');
+		dropdowns.forEach(function(dropdown) {
+			dropdown.addEventListener('click', function(e) {
+				closeOpenDropdown(e.currentTarget);
+				e.currentTarget.classList.toggle('open');
+				openDropdown = e.currentTarget;
+				e.stopPropagation();
+			});
+		});
+
+		document.addEventListener('click', function() {
+			closeOpenDropdown();
+		});
+	}
+
+	init();
+})($all);

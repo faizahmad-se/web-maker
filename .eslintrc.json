@@ -19,7 +19,7 @@
 		"computed-property-spacing": ["error", "never"],
 		"consistent-return": "error",
 		"consistent-this": "off",
-		"curly": "error",
+		"curly": "off",
 		"default-case": "error",
 		"dot-location": ["error", "property"],
 		"dot-notation": "error",
@@ -46,7 +46,7 @@
 		"new-parens": "error",
 		"newline-after-var": "off",
 		"newline-before-return": "off",
-		"newline-per-chained-call": "error",
+		"newline-per-chained-call": "off",
 		"no-alert": "off",
 		"no-array-constructor": "error",
 		"no-bitwise": "off",
@@ -120,7 +120,7 @@
 		"no-throw-literal": "error",
 		"no-trailing-spaces": "error",
 		"no-undef-init": "error",
-		"no-undefined": "error",
+		"no-undefined": "off",
 		"no-underscore-dangle": "error",
 		"no-unmodified-loop-condition": "error",
 		"no-unneeded-ternary": "error",
@@ -200,6 +200,8 @@
 		"escodegen": true,
 		"utils": true,
 		"Promise": true,
-		"Inlet": true
+		"Inlet": true,
+		"db": true,
+		"firebase": true
 	}
 }
